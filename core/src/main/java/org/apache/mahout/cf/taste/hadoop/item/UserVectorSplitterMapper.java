@@ -38,28 +38,39 @@ import java.util.Iterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Rewrites vectors as preference vectors, pruning them when they are longer
+ * than {@code maxPrefsPerUserConsidered}. If {@code itemBased} is true then the
+ * vectors are transposed.
+ */
 public final class UserVectorSplitterMapper extends
-    Mapper<VarLongWritable,VectorWritable, VarIntWritable,VectorOrPrefWritable> {
-
-  private static final Logger log = LoggerFactory.getLogger(UserVectorSplitterMapper.class);
-
+    Mapper<VarLongWritable,VectorWritable,VarIntWritable,VectorOrPrefWritable> {
+  
+  private static final Logger log = LoggerFactory
+      .getLogger(UserVectorSplitterMapper.class);
+  
   static final String USERS_FILE = "usersFile";
-  static final String MAX_PREFS_PER_USER_CONSIDERED = "maxPrefsPerUserConsidered";
+  public static final String MAX_PREFS_PER_USER_CONSIDERED = "maxPrefsPerUserConsidered";
+  public static final String ITEM_BASED = "itemBased";
   static final int DEFAULT_MAX_PREFS_PER_USER_CONSIDERED = 10;
-
+  
   private int maxPrefsPerUserConsidered;
   private FastIDSet usersToRecommendFor;
-
+  private boolean itemBased;
+  
   @Override
   protected void setup(Context context) throws IOException {
     Configuration jobConf = context.getConfiguration();
-    maxPrefsPerUserConsidered = jobConf.getInt(MAX_PREFS_PER_USER_CONSIDERED, DEFAULT_MAX_PREFS_PER_USER_CONSIDERED);
+    maxPrefsPerUserConsidered = jobConf.getInt(MAX_PREFS_PER_USER_CONSIDERED,
+        DEFAULT_MAX_PREFS_PER_USER_CONSIDERED);
+    itemBased = jobConf.getBoolean(ITEM_BASED, Boolean.TRUE);
     String usersFilePathString = jobConf.get(USERS_FILE);
     if (usersFilePathString != null) {
       FSDataInputStream in = null;
       try {
         Path unqualifiedUsersFilePath = new Path(usersFilePathString);
-        FileSystem fs = FileSystem.get(unqualifiedUsersFilePath.toUri(), jobConf);
+        FileSystem fs = FileSystem.get(unqualifiedUsersFilePath.toUri(),
+            jobConf);
         usersToRecommendFor = new FastIDSet();
         Path usersFilePath = unqualifiedUsersFilePath.makeQualified(fs);
         in = fs.open(usersFilePath);
@@ -75,11 +86,10 @@ public final class UserVectorSplitterMapper extends
       }
     }
   }
-
+  
   @Override
-  protected void map(VarLongWritable key,
-                     VectorWritable value,
-                     Context context) throws IOException, InterruptedException {
+  protected void map(VarLongWritable key, VectorWritable value, Context context)
+      throws IOException, InterruptedException {
     long userID = key.get();
     if (usersToRecommendFor != null && !usersToRecommendFor.contains(userID)) {
       return;
@@ -90,19 +100,24 @@ public final class UserVectorSplitterMapper extends
     VectorOrPrefWritable vectorOrPref = new VectorOrPrefWritable();
     while (it.hasNext()) {
       Vector.Element e = it.next();
-      itemIndexWritable.set(e.index());
-      vectorOrPref.set(userID, (float) e.get());
+      if (itemBased) {
+        itemIndexWritable.set(e.index());
+        vectorOrPref.set(userID, (float) e.get());
+      } else {
+        itemIndexWritable.set((int) userID);
+        vectorOrPref.set(e.index(), (float) e.get());
+      }
       context.write(itemIndexWritable, vectorOrPref);
     }
   }
-
+  
   private Vector maybePruneUserVector(Vector userVector) {
     if (userVector.getNumNondefaultElements() <= maxPrefsPerUserConsidered) {
       return userVector;
     }
-
+    
     float smallestLargeValue = findSmallestLargeValue(userVector);
-
+    
     // "Blank out" small-sized prefs to reduce the amount of partial products
     // generated later. They're not zeroed, but NaN-ed, so they come through
     // and can be used to exclude these items from prefs.
@@ -114,19 +129,20 @@ public final class UserVectorSplitterMapper extends
         e.set(Float.NaN);
       }
     }
-
+    
     return userVector;
   }
-
+  
   private float findSmallestLargeValue(Vector userVector) {
-
-    TopK<Float> topPrefValues = new TopK<Float>(maxPrefsPerUserConsidered, new Comparator<Float>() {
-      @Override
-      public int compare(Float one, Float two) {
-        return one.compareTo(two);
-      }
-    });
-
+    
+    TopK<Float> topPrefValues = new TopK<Float>(maxPrefsPerUserConsidered,
+        new Comparator<Float>() {
+          @Override
+          public int compare(Float one, Float two) {
+            return one.compareTo(two);
+          }
+        });
+    
     Iterator<Vector.Element> it = userVector.iterateNonZero();
     while (it.hasNext()) {
       float absValue = Math.abs((float) it.next().get());
@@ -134,5 +150,5 @@ public final class UserVectorSplitterMapper extends
     }
     return topPrefValues.smallestGreat();
   }
-
+  
 }

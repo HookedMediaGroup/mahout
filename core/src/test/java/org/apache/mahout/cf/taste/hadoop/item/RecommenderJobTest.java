@@ -235,6 +235,7 @@ public class RecommenderJobTest extends TasteTestCase {
 
     UserVectorSplitterMapper mapper = new UserVectorSplitterMapper();
     setField(mapper, "maxPrefsPerUserConsidered", 10);
+    setField(mapper, "itemBased", true);
 
     RandomAccessSparseVector vector = new RandomAccessSparseVector(Integer.MAX_VALUE, 100);
     vector.set(34, 0.5);
@@ -284,7 +285,7 @@ public class RecommenderJobTest extends TasteTestCase {
     UserVectorSplitterMapper mapper = new UserVectorSplitterMapper();
     setField(mapper, "maxPrefsPerUserConsidered", 10);
     setField(mapper, "usersToRecommendFor", usersToRecommendFor);
-
+    setField(mapper, "itemBased", true);
 
     RandomAccessSparseVector vector = new RandomAccessSparseVector(Integer.MAX_VALUE, 100);
     vector.set(34, 0.5);
@@ -312,6 +313,7 @@ public class RecommenderJobTest extends TasteTestCase {
 
     UserVectorSplitterMapper mapper = new UserVectorSplitterMapper();
     setField(mapper, "maxPrefsPerUserConsidered", 1);
+    setField(mapper, "itemBased", true);
 
     RandomAccessSparseVector vector = new RandomAccessSparseVector(Integer.MAX_VALUE, 100);
     vector.set(34, 0.5);

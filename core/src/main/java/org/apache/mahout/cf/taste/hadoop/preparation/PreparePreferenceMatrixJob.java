@@ -61,6 +61,7 @@ public class PreparePreferenceMatrixJob extends AbstractJob {
     addOption("minPrefsPerUser", "mp", "ignore users with less preferences than this "
             + "(default: " + DEFAULT_MIN_PREFS_PER_USER + ')', String.valueOf(DEFAULT_MIN_PREFS_PER_USER));
     addOption("booleanData", "b", "Treat input as without pref values", Boolean.FALSE.toString());
+    addOption("encodeLongsAsInts", "elai", "Encode Long item values as ints (true)", Boolean.TRUE.toString());
     addOption("ratingShift", "rs", "shift ratings by this value", "0.0");
 
     Map<String, List<String>> parsedArgs = parseArguments(args);
@@ -70,15 +71,20 @@ public class PreparePreferenceMatrixJob extends AbstractJob {
 
     int minPrefsPerUser = Integer.parseInt(getOption("minPrefsPerUser"));
     boolean booleanData = Boolean.valueOf(getOption("booleanData"));
+    boolean encodeLongsAsInts = Boolean.valueOf(getOption("encodeLongsAsInts"));
     float ratingShift = Float.parseFloat(getOption("ratingShift"));
-    //convert items to an internal index
-    Job itemIDIndex = prepareJob(getInputPath(), getOutputPath(ITEMID_INDEX), TextInputFormat.class,
-            ItemIDIndexMapper.class, VarIntWritable.class, VarLongWritable.class, ItemIDIndexReducer.class,
-            VarIntWritable.class, VarLongWritable.class, SequenceFileOutputFormat.class);
-    itemIDIndex.setCombinerClass(ItemIDIndexReducer.class);
-    boolean succeeded = itemIDIndex.waitForCompletion(true);
-    if (!succeeded) {
-      return -1;
+    if (encodeLongsAsInts) {
+      // convert items to an internal index
+      Job itemIDIndex = prepareJob(getInputPath(), getOutputPath(ITEMID_INDEX),
+          TextInputFormat.class, ItemIDIndexMapper.class, VarIntWritable.class,
+          VarLongWritable.class, ItemIDIndexReducer.class,
+          VarIntWritable.class, VarLongWritable.class,
+          SequenceFileOutputFormat.class);
+      itemIDIndex.setCombinerClass(ItemIDIndexReducer.class);
+      boolean succeeded = itemIDIndex.waitForCompletion(true);
+      if (!succeeded) {
+        return -1;
+      }
     }
     //convert user preferences into a vector per user
     Job toUserVectors = prepareJob(getInputPath(),
@@ -94,7 +100,7 @@ public class PreparePreferenceMatrixJob extends AbstractJob {
     toUserVectors.getConfiguration().setBoolean(RecommenderJob.BOOLEAN_DATA, booleanData);
     toUserVectors.getConfiguration().setInt(ToUserVectorsReducer.MIN_PREFERENCES_PER_USER, minPrefsPerUser);
     toUserVectors.getConfiguration().set(ToEntityPrefsMapper.RATING_SHIFT, String.valueOf(ratingShift));
-    succeeded = toUserVectors.waitForCompletion(true);
+    boolean succeeded = toUserVectors.waitForCompletion(true);
     if (!succeeded) {
       return -1;
     }

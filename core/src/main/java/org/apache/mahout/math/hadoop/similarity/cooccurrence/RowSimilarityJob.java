@@ -17,8 +17,14 @@
 
 package org.apache.mahout.math.hadoop.similarity.cooccurrence;
 
-import com.google.common.base.Preconditions;
-import com.google.common.primitives.Ints;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
@@ -35,17 +41,12 @@ import org.apache.mahout.common.mapreduce.VectorSumReducer;
 import org.apache.mahout.math.RandomAccessSparseVector;
 import org.apache.mahout.math.Vector;
 import org.apache.mahout.math.VectorWritable;
-import org.apache.mahout.math.hadoop.similarity.cooccurrence.measures.VectorSimilarityMeasures;
 import org.apache.mahout.math.hadoop.similarity.cooccurrence.measures.VectorSimilarityMeasure;
+import org.apache.mahout.math.hadoop.similarity.cooccurrence.measures.VectorSimilarityMeasures;
 import org.apache.mahout.math.map.OpenIntIntHashMap;
 
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+import com.google.common.base.Preconditions;
+import com.google.common.primitives.Ints;
 
 public class RowSimilarityJob extends AbstractJob {
 
@@ -63,9 +64,9 @@ public class RowSimilarityJob extends AbstractJob {
   static final String NUM_NON_ZERO_ENTRIES_PATH = RowSimilarityJob.class + ".nonZeroEntriesPath";
   private static final int DEFAULT_MAX_SIMILARITIES_PER_ROW = 100;
 
-  private static final int NORM_VECTOR_MARKER = Integer.MIN_VALUE;
-  private static final int MAXVALUE_VECTOR_MARKER = Integer.MIN_VALUE + 1;
-  private static final int NUM_NON_ZERO_ENTRIES_VECTOR_MARKER = Integer.MIN_VALUE + 2;
+  static final int NORM_VECTOR_MARKER = Integer.MIN_VALUE;
+  static final int MAXVALUE_VECTOR_MARKER = Integer.MIN_VALUE + 1;
+  static final int NUM_NON_ZERO_ENTRIES_VECTOR_MARKER = Integer.MIN_VALUE + 2;
 
   enum Counters { ROWS, COOCCURRENCES, PRUNED_COOCCURRENCES }
 
@@ -86,6 +87,7 @@ public class RowSimilarityJob extends AbstractJob {
         + DEFAULT_MAX_SIMILARITIES_PER_ROW + ')', String.valueOf(DEFAULT_MAX_SIMILARITIES_PER_ROW));
     addOption("excludeSelfSimilarity", "ess", "compute similarity of rows to themselves?", String.valueOf(false));
     addOption("threshold", "tr", "discard row pairs with a similarity value below this", false);
+    addOption("outputColumns", "c", "Output columns as a results of the comparison (true)", Boolean.TRUE.toString());
     addOption(DefaultOptionCreator.overwriteOption().create());
 
     Map<String,List<String>> parsedArgs = parseArguments(args);
@@ -123,6 +125,7 @@ public class RowSimilarityJob extends AbstractJob {
     boolean excludeSelfSimilarity = Boolean.parseBoolean(getOption("excludeSelfSimilarity"));
     double threshold = hasOption("threshold") ?
         Double.parseDouble(getOption("threshold")) : NO_THRESHOLD;
+    boolean outputColumns = Boolean.valueOf(getOption("outputColumns"));
 
     Path weightsPath = getTempPath("weights");
     Path normsPath = getTempPath("norms.bin");
@@ -133,7 +136,8 @@ public class RowSimilarityJob extends AbstractJob {
     AtomicInteger currentPhase = new AtomicInteger();
 
     if (shouldRunNextPhase(parsedArgs, currentPhase)) {
-      Job normsAndTranspose = prepareJob(getInputPath(), weightsPath, VectorNormMapper.class, IntWritable.class,
+      Job normsAndTranspose = prepareJob(getInputPath(), weightsPath,
+          outputColumns ? ColumnVectorNormMapper.class : RowVectorNormMapper.class, IntWritable.class,
           VectorWritable.class, MergeVectorsReducer.class, IntWritable.class, VectorWritable.class);
       normsAndTranspose.setCombinerClass(MergeVectorsCombiner.class);
       Configuration normsAndTransposeConf = normsAndTranspose.getConfiguration();
@@ -149,8 +153,9 @@ public class RowSimilarityJob extends AbstractJob {
     }
 
     if (shouldRunNextPhase(parsedArgs, currentPhase)) {
-      Job pairwiseSimilarity = prepareJob(weightsPath, pairwiseSimilarityPath, CooccurrencesMapper.class,
-          IntWritable.class, VectorWritable.class, SimilarityReducer.class, IntWritable.class, VectorWritable.class);
+      Job pairwiseSimilarity = prepareJob(outputColumns ? weightsPath : getInputPath(),
+          pairwiseSimilarityPath, CooccurrencesMapper.class, IntWritable.class, VectorWritable.class,
+          SimilarityReducer.class, IntWritable.class, VectorWritable.class);
       pairwiseSimilarity.setCombinerClass(VectorSumReducer.class);
       Configuration pairwiseConf = pairwiseSimilarity.getConfiguration();
       pairwiseConf.set(THRESHOLD, String.valueOf(threshold));
@@ -179,65 +184,6 @@ public class RowSimilarityJob extends AbstractJob {
     }
 
     return 0;
-  }
-
-  public static class VectorNormMapper extends Mapper<IntWritable,VectorWritable,IntWritable,VectorWritable> {
-
-    private VectorSimilarityMeasure similarity;
-    private Vector norms;
-    private Vector nonZeroEntries;
-    private Vector maxValues;
-    private double threshold;
-
-    @Override
-    protected void setup(Context ctx) throws IOException, InterruptedException {
-      similarity = ClassUtils.instantiateAs(ctx.getConfiguration().get(SIMILARITY_CLASSNAME),
-          VectorSimilarityMeasure.class);
-      norms = new RandomAccessSparseVector(Integer.MAX_VALUE);
-      nonZeroEntries = new RandomAccessSparseVector(Integer.MAX_VALUE);
-      maxValues = new RandomAccessSparseVector(Integer.MAX_VALUE);
-      threshold = Double.parseDouble(ctx.getConfiguration().get(THRESHOLD));
-    }
-
-    @Override
-    protected void map(IntWritable row, VectorWritable vectorWritable, Context ctx)
-      throws IOException, InterruptedException {
-
-      Vector rowVector = similarity.normalize(vectorWritable.get());
-
-      int numNonZeroEntries = 0;
-      double maxValue = Double.MIN_VALUE;
-
-      Iterator<Vector.Element> nonZeroElements = rowVector.iterateNonZero();
-      while (nonZeroElements.hasNext()) {
-        Vector.Element element = nonZeroElements.next();
-        RandomAccessSparseVector partialColumnVector = new RandomAccessSparseVector(Integer.MAX_VALUE);
-        partialColumnVector.setQuick(row.get(), element.get());
-        ctx.write(new IntWritable(element.index()), new VectorWritable(partialColumnVector));
-
-        numNonZeroEntries++;
-        if (maxValue < element.get()) {
-          maxValue = element.get();
-        }
-      }
-
-      if (threshold != NO_THRESHOLD) {
-        nonZeroEntries.setQuick(row.get(), numNonZeroEntries);
-        maxValues.setQuick(row.get(), maxValue);
-      }
-      norms.setQuick(row.get(), similarity.norm(rowVector));
-
-      ctx.getCounter(Counters.ROWS).increment(1);
-    }
-
-    @Override
-    protected void cleanup(Context ctx) throws IOException, InterruptedException {
-      super.cleanup(ctx);
-      // dirty trick
-      ctx.write(new IntWritable(NORM_VECTOR_MARKER), new VectorWritable(norms));
-      ctx.write(new IntWritable(NUM_NON_ZERO_ENTRIES_VECTOR_MARKER), new VectorWritable(nonZeroEntries));
-      ctx.write(new IntWritable(MAXVALUE_VECTOR_MARKER), new VectorWritable(maxValues));
-    }
   }
 
   public static class MergeVectorsCombiner extends Reducer<IntWritable,VectorWritable,IntWritable,VectorWritable> {
